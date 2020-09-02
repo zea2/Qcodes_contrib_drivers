@@ -53,6 +53,7 @@ class APS100(VisaInstrument):
             for 4K operation 0.12A/s (0.013605 T/s, 0.8163 T/min) - not recommended ???
 
     """
+
     # Reg. exp. to match a float or exponent in a string
     _re_float_exp = r'[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?'
 
@@ -60,7 +61,7 @@ class APS100(VisaInstrument):
 
         log.debug('Initializing instrument')
 
-        super().__init__(name, address, **kwargs) #
+        super().__init__(name, address, **kwargs)
 
         self.visa_handle.baud_rate = 19200
         self.visa_handle.parity = visa.constants.Parity.none
@@ -104,7 +105,7 @@ class APS100(VisaInstrument):
                            get_cmd='RATE? 0',
                            set_cmd=False,
                            )
-        
+
         self.add_parameter('pause_sweep',
                            set_cmd='SWEEP PAUSE',
                            )
@@ -131,7 +132,7 @@ class APS100(VisaInstrument):
             self.visa_log.debug(f"Response: {response}")
         return response
 
-
+    # @Beata is this right like this? At the moment it still returns a list because of the square brackets around msg.split(',')
     # The function below may be redundant
     def _value_parser(self, msg):
         fields = [msg.split(',')]
