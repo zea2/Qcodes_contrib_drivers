@@ -53,21 +53,6 @@ class APS100(VisaInstrument):
             for 4K operation 0.12A/s (0.013605 T/s, 0.8163 T/min) - not recommended ???
 
     """
-
-    def ask_raw(self, cmd: str) -> str:
-        """Override ask_raw to perform ``read`` and ``write`` separately instead of ``query``"""
-        with DelayedKeyboardInterrupt():
-            self.visa_log.debug(f"Querying: {cmd}")
-            # Write command to instrument, like in ``self.write_raw``
-            nr_bytes_written, ret_code = self.visa_handle.write(cmd)
-            self.check_error(ret_code)
-            # Read first response (= previously written command)
-            self.visa_handle.read()
-            # Read actual response
-            response = self.visa_handle.read()
-            self.visa_log.debug(f"Response: {response}")
-        return response
-
     # Reg. exp. to match a float or exponent in a string
     _re_float_exp = r'[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?'
 
@@ -130,7 +115,23 @@ class APS100(VisaInstrument):
 
         self.add_parameter(name='reset_quench',
                            set_cmd='QRESET',)
-   
+
+
+    def ask_raw(self, cmd: str) -> str:
+        """Override ask_raw to perform ``read`` and ``write`` separately instead of ``query``"""
+        with DelayedKeyboardInterrupt():
+            self.visa_log.debug(f"Querying: {cmd}")
+            # Write command to instrument, like in ``self.write_raw``
+            nr_bytes_written, ret_code = self.visa_handle.write(cmd)
+            self.check_error(ret_code)
+            # Read first response (= previously written command)
+            self.visa_handle.read()
+            # Read actual response
+            response = self.visa_handle.read()
+            self.visa_log.debug(f"Response: {response}")
+        return response
+
+
     # The function below may be redundant
     def _value_parser(self, msg):
         fields = [msg.split(',')]
