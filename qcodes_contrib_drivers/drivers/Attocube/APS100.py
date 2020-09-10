@@ -21,6 +21,7 @@ import time
 from qcodes.utils.validators import Numbers, Enum
 from qcodes.instrument.visa import VisaInstrument, DelayedKeyboardInterrupt
 import pyvisa.constants as vi_const
+import re
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,9 @@ class APS100(VisaInstrument):
     # Reg. exp. to match a float or exponent in a string
     _re_float_exp = r'[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?'
 
+    # Reg. exp. to match float + unit in a string
+    _re_float_unit_exp = r'^({})\s?([a-zA-Z]*)$'.format(_re_float_exp)
+
     def __init__(self, name: str, address: str, **kwargs):
 
         log.debug('Initializing instrument')
@@ -74,17 +78,13 @@ class APS100(VisaInstrument):
                                vi_const.VI_WRITE_BUF_DISCARD)  # keep for debugging
 
         # The following command already returns error because of the terminator but the above termination
-        # is the only one that does not crush the communication. The solution is to requrest reply twice but I am not sure 
+        # is the only one that does not crush the communication. The solution is to requrest reply twice but I am not sure
         # if "get" command consists of both "write " and  "read"
         idn = self.IDN.get()
         print(idn)
-        
+
         self.write('REMOTE')
-        
-        # The command below specifies that the magnet supply will work in units of Ampers rather that Gauss or Tesla
-        # The user should work in units of Testa. The conversion ks via default_scale set above.
-        self.write('UNITSA')
-        
+
         self.add_parameter('persistent_mode',
                            get_cmd='PSHTR?',
                            set_cmd=False,
@@ -93,9 +93,16 @@ class APS100(VisaInstrument):
         self.add_parameter(name='B_field_now',
                            get_cmd='IMAG?',
                            get_parser=self._value_parser,
-                           set_cmd='IMAG {}'
+                           set_cmd='IMAG {}',
+                           unit='A'
                            )
-        
+
+        self.add_parameter(name='units',
+                           get_cmd='UNITS?',
+                           set_cmd=self._set_units,
+                           vals=Enum('A', 'kG')
+                           )
+
         self.add_parameter('sweep',
                            get_cmd='SWEEP?',
                            set_cmd=self._set_sweep,
@@ -109,7 +116,7 @@ class APS100(VisaInstrument):
         self.add_parameter('pause_sweep',
                            set_cmd='SWEEP PAUSE',
                            )
-               
+
         self.add_parameter('set_B',
                            set_cmd=self._set_B,
                            )
@@ -117,13 +124,17 @@ class APS100(VisaInstrument):
         self.add_parameter(name='reset_quench',
                            set_cmd='QRESET',)
 
+        self.units('A')
 
     def ask_raw(self, cmd: str) -> str:
         """Override ask_raw to perform ``read`` and ``write`` separately instead of ``query``"""
         with DelayedKeyboardInterrupt():
+            # Flush buffer, to remove old responses from device
+            self.visa_handle.flush(vi_const.VI_READ_BUF_DISCARD)
             self.visa_log.debug(f"Querying: {cmd}")
             # Write command to instrument, like in ``self.write_raw``
             nr_bytes_written, ret_code = self.visa_handle.write(cmd)
+            # Check return code
             self.check_error(ret_code)
             # Read first response (= previously written command)
             self.visa_handle.read()
@@ -132,12 +143,18 @@ class APS100(VisaInstrument):
             self.visa_log.debug(f"Response: {response}")
         return response
 
-    # @Beata is this right like this? At the moment it still returns a list because of the square brackets around msg.split(',')
-    # The function below may be redundant
     def _value_parser(self, msg):
-        fields = [msg.split(',')]
-        return float(fields[0])
-        
+        match = re.match(self._re_float_unit_exp, msg)
+        if not match:
+            raise ValueError("Couldn't extract float from '{}'".format(msg))
+        # If you need the unit, it's stored in match[5]
+        return float(match[1])
+
+    def _set_units(self, unit: str):
+        # Sets the magnetic field unit (A or kG) for both the hardware and the B_field_now parameter
+        self.write("UNITS {}".format(unit))
+        self.B_field_now.unit = unit
+
     # I would like this function to set the magnetic field and sweep the field up (down) to that value.
     # We would like to read the values of magnetic field during the sweep so we could measure some sample parameters as a function of magnetic field.
     # I am not sure if reading the field is possible while the magnet power supply is changing the current that generates the field.
