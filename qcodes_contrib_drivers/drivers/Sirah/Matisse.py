@@ -1,6 +1,7 @@
 import abc
 import re
 from typing import Optional, Union
+import visa
 
 import qcodes.utils.validators as vals
 from qcodes.instrument.channel import InstrumentChannel, ChannelList
@@ -26,7 +27,7 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
         self.add_parameter("position",
                            label="Current position of motor",
                            get_cmd=self._cmd_prefix + "POS?",
-                           set_cmd=self._cmd_prefix + "POS {}",
+                           set_cmd=self._set_position,
                            get_parser=self._int_parser,
                            vals=vals.Ints(),
                            # TODO unit="???", # steps?
@@ -36,19 +37,47 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                            of the motor movement.
                            """)
 
+        self.add_parameter("target_position",
+                           label="Target position of motor",
+                           get_cmd=None,
+                           set_cmd=self._cmd_prefix + "POS {}",
+                           vals=vals.Ints(),
+                           docstring="""
+                           Sets the target position of stepper motor position and moves to the
+                           desired position asynchronously.
+                           """)
+
+        self.add_parameter("raw_status",
+                           label="Status of motor controller",
+                           get_cmd=self._cmd_prefix + "STA?",
+                           vals=vals.Ints(),
+                           docstring="""
+                           Retrieve the status and setting of motor controller. The status is binary
+                           coded into a single 16-bit integer value. The bits have the following
+                           meanings:
+                             - bits 0 to 7: Current status of the controller, negative means error
+                             - bit 8: Indicates that the motor is running
+                             - bit 9: Indicates the motor current is switched off
+                             - bit 10: Indicates an invalid motor position after hold was switched
+                                       off
+                             - bit 11: Status of limit switch 1
+                             - bit 12: Status of limit switch 2
+                             - bit 13: Status of home switch
+                             - bit 14: Manual control enable/disable
+                           """)
+
         self.add_parameter("status",
                            label="Status of motor controller",
                            get_cmd=self._cmd_prefix + "STA?",
                            get_parser=self._status_parser,
-                           # TODO unit="???",
                            docstring="""
                            Retrieve the status and setting of motor controller. The status is binary
                            coded into a single 16-bit integer value. When getting this parameter,
                            the integer-bits are automatically converted into a dictionary with the
                            following keys:
                              - raw: Same as argument status
-                             - status: Current status of the controller (bits 0 to 6)
-                             - is_error: Set in case of an error status of the controller (bit 7)
+                             - status: Current status of the controller, negative means error (bits
+                                       0 to 7)
                              - motor_running: Indicates that the motor is running (bit 8)
                              - motor_current_off: Indicates the motor current is switched off (bit
                                                   9)
@@ -110,6 +139,21 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                            Gets/sets the number of motor steps made by the Birefringent Filter when
                            the manual control button is pressed for a short time.
                            """)
+
+    def _set_position(self, target_position: int) -> None:
+        self.target_position = target_position
+
+        # Wait for completion of movement
+        while True:  # 0x02 = idle
+            status = self.status["status"]
+            if status == 0x02:  # 0x02 := idle
+                break
+            if status < 0:  # < 0 := error (bit 7 is set)
+                raise visa.VisaIOError(status)
+
+        # TODO: Alternatively, try this. Check what which one better...
+        # while self.position() != target_position:
+        #     pass
 
     @staticmethod
     def _int_parser(value: str) -> int:
