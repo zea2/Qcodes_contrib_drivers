@@ -1,24 +1,94 @@
 import abc
 import re
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 import visa
+import warnings
 
 import qcodes.utils.validators as vals
 from qcodes.instrument.channel import InstrumentChannel, ChannelList
 from qcodes.instrument.visa import VisaInstrument
+from qcodes.utils.delaykeyboardinterrupt import DelayedKeyboardInterrupt
 
 
-# class SirahMatisseError(Exception):
-#     def __init__(self, message: str, error_code: Optional[int]):
-#         super().__init__(message, error_code)
-#         self._message = message
-#         self._error_code = error_code
-#
-#     def __str__(self):
-#         return "{} ({})".format(self._message, self._error_code)
+class SirahMatisseError(Exception):
+    """Exception class representing errors related to the Sirah Matisse driver
+
+    Args:
+        message: Error message
+        error_code: Return/error code
+    """
+
+    def __init__(self, message: str, error_code: Optional[int] = None):
+        super().__init__(message, error_code)
+        self._message = message
+        self._error_code = error_code
+
+    def __str__(self):
+        return "{} ({})".format(self._message, self._error_code)
+
+
+class SirahMatissePowerDiode(InstrumentChannel):
+    """Instrument channel for power diode of Sirah Matisse
+
+    Args:
+        parent: Parent SirahMatisse instrument object
+        name: Name of this motor-channel
+    """
+
+    def __init__(self, parent: "SirahMatisse", name: str, **kwargs):
+        super().__init__(parent, name, **kwargs)
+
+        self._cmd_prefix = "DPOW:"
+
+        self.add_parameter("dc_value",
+                           label="DC-part",
+                           get_cmd=self._cmd_prefix + "DC?",
+                           get_parser=float,
+                           unit="V",
+                           docstring="""
+                           Gets the DC-part of the integral laser output. The value is given in
+                           volts at the controller input. This is a read-only value.
+                           """)
+
+        self.add_parameter("wave_table",
+                           label="Current waveform of the AC-part",
+                           get_cmd=self._cmd_prefix + "WAVTAB?",
+                           get_parser=self._wave_table_parser,
+                           unit="V",
+                           docstring="""
+                           Gets the current waveform of the AC-part of the integral laser output.
+                           The values are normalized to be in the range [-1,1]. The number of values
+                           is determined by the setting of `piezo_etalon.oversampling`.
+                           """)
+
+        self.add_parameter("low",
+                           label="Current value of the low power level",
+                           get_cmd=self._cmd_prefix + "LOW?",
+                           set_cmd=self._cmd_prefix + "LOW ",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           unit="V",
+                           docstring="""
+                           Gets/sets the current value of the low power level. When the signal at
+                           the integral power diode drops below this level all control loops are
+                           deactivated. Setting the level to 0 (zero) de-activates this function.
+                           """)
+
+    @staticmethod
+    def _wave_table_parser(raw_wave_table: str) -> List[float]:
+        return [float(raw_value) for raw_value in raw_wave_table.split()]
 
 
 class SirahMatisseMotor(InstrumentChannel, abc.ABC):
+    """Base class for motor-submodules of Sirah Matisse (e.g. birefrigent filter motor, thin etalon
+    motor)
+
+    Args:
+        parent: Parent SirahMatisse instrument object
+        name: Name of this motor-channel
+        cmd_prefix: Prefix for VISA-commands (e.g. MOTBI, MOTTE)
+    """
+
     def __init__(self, parent: "SirahMatisse", name: str, cmd_prefix: str, **kwargs):
         super().__init__(parent, name, **kwargs)
 
@@ -28,7 +98,7 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                            label="Current position of motor",
                            get_cmd=self._cmd_prefix + "POS?",
                            set_cmd=self._set_position,
-                           get_parser=self._int_parser,
+                           get_parser=int,
                            vals=vals.Ints(),
                            # TODO unit="???", # steps?
                            docstring="""
@@ -50,6 +120,7 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
         self.add_parameter("raw_status",
                            label="Status of motor controller",
                            get_cmd=self._cmd_prefix + "STA?",
+                           get_parser=int,
                            vals=vals.Ints(),
                            docstring="""
                            Retrieve the status and setting of motor controller. The status is binary
@@ -93,7 +164,7 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                            label="Maximum position of stepper "
                                  "motor.",
                            get_cmd=self._cmd_prefix + "MAX?",
-                           get_parser=self._int_parser,
+                           get_parser=int,
                            vals=vals.Ints(),
                            # TODO unit="???",
                            docstring="""Gets the maximum position of the stepper motor.""")
@@ -132,7 +203,7 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                            label="Number of steps made by birefringent filter motor",
                            get_cmd=self._cmd_prefix + "INC?",
                            set_cmd=self._cmd_prefix + "INC {}",
-                           get_parser=self._int_parser,
+                           get_parser=int,
                            vals=vals.Ints(),
                            # TODO unit="???", # steps?
                            docstring="""
@@ -141,11 +212,22 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                            """)
 
     def _set_position(self, target_position: int) -> None:
-        self.target_position = target_position
+        """Sets the motor's target position and waits until it is reached.
 
-        # Wait for completion of movement
-        while True:  # 0x02 = idle
-            status = self.status["status"]
+        Args:
+            target_position: Target position to move to
+        """
+        # Wait for completion of previous task
+        self._wait_for_idle()
+        # Set desired target-position
+        self.target_position(target_position)
+        # Wait for completion of movement to target-position
+        self._wait_for_idle()
+
+    def _wait_for_idle(self):
+        """Waits until parameter `status` is 2 (= idle)"""
+        while True:
+            status = self.status()["status"]
             if status == 0x02:  # 0x02 := idle
                 break
             if status < 0:  # < 0 := error (bit 7 is set)
@@ -156,19 +238,11 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
         #     pass
 
     @staticmethod
-    def _int_parser(value: str) -> int:
-        return int(value.split()[-1])
-
-    @staticmethod
-    def _float_parser(value: str) -> float:
-        return float(value.split()[-1])
-
-    @staticmethod
-    def _status_parser(status: int) -> dict:
+    def _status_parser(raw_status: str) -> dict:
         """Converts an integer with separate status-bits into a dictionary of ints and bools.
 
         Args:
-            status: Raw status actually returned by parameter `status`.
+            raw_status: Raw status, returned by command :<MOTOR>:STATUS?.
 
         Returns:
             Dictionary with following keys:
@@ -183,6 +257,7 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
                 - home_switch: Status of home switch (bit 13)
                 - manual_control: Manual control enable/disable (bit 14)
         """
+        status = int(raw_status)
         return dict(raw=status,
                     status=status & 0xff,  # bits 0 to 7
                     motor_running=bool((status >> 8) & 1),  # bit 8
@@ -195,6 +270,13 @@ class SirahMatisseMotor(InstrumentChannel, abc.ABC):
 
 
 class SirahMatisseBiFiMotor(SirahMatisseMotor):
+    """Birefringent filter motor of Sirah Matisse
+
+    Args:
+        parent: Parent SirahMatisse-instrument object
+        name: Name of this motor-channel
+    """
+
     def __init__(self, parent: "SirahMatisse", name: str, **kwargs):
         super().__init__(parent, name, "MOTBI", **kwargs)
 
@@ -226,7 +308,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            label="Step frequency of birefringent filter motor",
                            get_cmd=self._cmd_prefix + "FREQ?",
                            set_cmd=self._cmd_prefix + "FREQ {}",
-                           get_parser=self._int_parser,
+                           get_parser=int,
                            vals=vals.Ints(),
                            # TODO unit="???", # Hz?
                            docstring="""
@@ -238,7 +320,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            label="BiFi-position in terms of a wavelength",
                            get_cmd=self._cmd_prefix + "WL?",
                            set_cmd=self._cmd_prefix + "WL {}",
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            vals=vals.Numbers(),
                            unit="nm",
                            docstring="""
@@ -253,7 +335,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                                  "filter motor position",
                            get_cmd=self._cmd_prefix + "CAVSCN?",
                            set_cmd=self._cmd_prefix + "CAVSCN {}",
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            vals=vals.Numbers(),
                            # TODO unit="???",
                            docstring="""
@@ -266,7 +348,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                                  "filter position",
                            get_cmd=self._cmd_prefix + "REFSCN?",
                            set_cmd=self._cmd_prefix + "REFSCN {}",
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            vals=vals.Numbers(),
                            # TODO unit="???",
                            docstring="""
@@ -280,7 +362,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            get_cmd=self._cmd_prefix + "MOTOFF?",
                            set_cmd=self._cmd_prefix + "MOTOFF {}",
                            vals=vals.Numbers(),
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            # TODO unit="???",
                            docstring="""
                            Gets/sets the calibration parameter *WavelengthOffset* for the step motor
@@ -291,7 +373,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            label="Calibration parameter for wavelength factor",
                            get_cmd=self._cmd_prefix + "MOTFAC?",
                            set_cmd=self._cmd_prefix + "MOTFAC {}",
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            vals=vals.Numbers(),
                            # TODO unit="???",
                            docstring="""
@@ -303,7 +385,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            label="Calibration parameter for lever length",
                            get_cmd=self._cmd_prefix + "MOTTHNS?",
                            set_cmd=self._cmd_prefix + "MOTTHNS {}",
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            vals=vals.Numbers(),
                            # TODO unit="???",
                            docstring="""
@@ -315,7 +397,7 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            label="Calibration parameter for linear offset",
                            get_cmd=self._cmd_prefix + "ORDER?",
                            set_cmd=self._cmd_prefix + "ORDER {}",
-                           get_parser=self._float_parser,
+                           get_parser=float,
                            vals=vals.Numbers(),  # or maybe integer (manual is not clear on that)
                            # TODO unit="???",
                            docstring="""
@@ -324,51 +406,335 @@ class SirahMatisseBiFiMotor(SirahMatisseMotor):
                            """)
 
 
-class SirahMatisseThEtMotor(SirahMatisseMotor):
+class SirahMatisseThinEtalonMotor(SirahMatisseMotor):
+    """Thin etalon motor of Sirah Matisse
+
+    Args:
+        parent: Parent SirahMatisse-instrument object
+        name: Name of this motor-channel
+    """
+
     def __init__(self, parent: "SirahMatisse", name: str, **kwargs):
         super().__init__(parent, name, "MOTTE", **kwargs)
 
 
+class SirahMatisseEtalonControl(InstrumentChannel, abc.ABC):
+    """Base class for etalon-control-submodules of Sirah Matisse (e.g. piezo etalon control, thin
+    etalon control)
+
+    Args:
+        parent: Parent SirahMatisse instrument object
+        name: Name of this motor-channel
+        cmd_prefix: Prefix for VISA-commands (e.g. PZETL, TE)
+    """
+
+    def __init__(self, parent: "SirahMatisse", name: str, cmd_prefix: str, **kwargs):
+        super().__init__(parent, name, **kwargs)
+
+        self._cmd_prefix = cmd_prefix.strip() + ":"
+
+        self.add_parameter("control_status",
+                           label="Status",
+                           get_cmd=self._cmd_prefix + "CNTRSTA?",
+                           set_cmd=self._cmd_prefix + "CNTRSTA {}",
+                           val_mapping={"run": "RUN", "stop": "STOP"},
+                           docstring="""
+                           Starts/stops or gets the status of a control loop
+                           """)
+
+        self.add_parameter("control_proportional",
+                           label="Proportional gain",
+                           get_cmd=self._cmd_prefix + "CNTRPROP?",
+                           set_cmd=self._cmd_prefix + "CNTRPROP {}",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the proportional gain of a control loop
+                           """)
+
+        self.add_parameter("control_average",
+                           label="Number of measurements averaged",
+                           get_cmd=self._cmd_prefix + "CNTRAVG?",
+                           set_cmd=self._cmd_prefix + "CNTRAVG {}",
+                           get_parser=int,
+                           vals=vals.Ints(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the number of measurements averaged of a control loop
+                           """)
+
+        self.add_parameter("cavity_scan",
+                           label="Proportional factor that controls how a scan of the slow cavity "
+                                 "influences the position of the thick piezo etalon",
+                           get_cmd=self._cmd_prefix + "CAVSCN?",
+                           set_cmd=self._cmd_prefix + "CAVSCN {}",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the proportional factor that controls how a scan of the slow
+                           cavity piezo influences the position of the thick piezo etalon. The
+                           factor results in an immediate piezo movement, even without the P (see
+                           PID Loops) control loop enabled.
+                           """)
+
+        self.add_parameter("reference_scan",
+                           label="Proportional factor that controls how a scan of the reference "
+                                 "cell piezo influences the position of the thick piezo etalon",
+                           get_cmd=self._cmd_prefix + "REFSCN?",
+                           set_cmd=self._cmd_prefix + "REFSCN {}",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the proportional factor that controls how a scan of the
+                           reference cell piezo influences the position of the thick piezo etalon.
+                           The factor results in an immediate piezo movement, even without the P
+                           (see PID Loops) control loop enabled.
+                           """)
+
+
+class SirahMatissePiezoEtalonControl(SirahMatisseEtalonControl):
+    def __init__(self, parent: "SirahMatisse", name: str, **kwargs):
+        super().__init__(parent, name, "PZETL", **kwargs)
+
+        self.add_parameter("oversampling",
+                           label="Number of sample points",
+                           get_cmd=self._cmd_prefix + "OVER?",
+                           set_cmd=self._cmd_prefix + "OVER {}",
+                           get_parser=int,
+                           vals=vals.Ints(8, 64),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the number of sample points used for sine interpolation. The
+                           minimum value is 8, the maximum value is 64 samples per period.
+                           """)
+
+        self.add_parameter("baseline",
+                           label="Baseline of the modulation waveform",
+                           get_cmd=self._cmd_prefix + "BASE?",
+                           set_cmd=self._cmd_prefix + "BASE {}",
+                           get_parser=float,
+                           vals=vals.Numbers(-1, 1),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the baseline of the modulation waveform to a new value. The
+                           value needs to be within the interval [-1,1].
+                           """)
+
+        self.add_parameter("amplitude",
+                           label="Amplitude of the modulation",
+                           get_cmd=self._cmd_prefix + "AMP?",
+                           set_cmd=self._cmd_prefix + "AMP {}",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the amplitude of the modulation of the thick etalon.
+                           """)
+
+        self.add_parameter("control_phaseshift",
+                           label="Phaseshift used for PLL calculation",
+                           get_cmd=self._cmd_prefix + "CNTRPHSF?",
+                           set_cmd=self._cmd_prefix + "CNTRPHSF {}",
+                           get_parser=int,
+                           vals=vals.Ints(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the phaseshift value used for the PLL calculation.
+                           """)
+
+        self.add_parameter("sample_rate",
+                           label="Sample rate",
+                           get_cmd=self._cmd_prefix + "SRATE?",
+                           set_cmd=self._cmd_prefix + "SRATE {}",
+                           get_parser=int,
+                           val_mapping={8: 0, 32: 1, 48: 2, 96: 3},
+                           unit="kHz",
+                           docstring="""
+                           Gets/sets the sample rate for the piezo etalon control loop. The product
+                           of samplerate and oversampling determines the modulation frequency of the
+                           etalon. Allowed values are 8, 32, 48 and 96 kHz.
+                           """)
+
+
+class SirahMatisseThinEtalonControl(SirahMatisseEtalonControl):
+    def __init__(self, parent: "SirahMatisse", name: str, **kwargs):
+        super().__init__(parent, name, "TE", **kwargs)
+
+        self.add_parameter("dc_value",
+                           label="DC-part of the thin etalon's reflex",
+                           get_cmd=self._cmd_prefix + "DC?",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           unit="V",
+                           docstring="""
+                           Gets the DC-part of the reflex of the thin etalon. The value is given in
+                           volts at the controller input.
+                           """)
+
+        self.add_parameter("control_error",
+                           label="Current error value",
+                           get_cmd=self._cmd_prefix + "CNTRERR?",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets the current error value of a control loop
+                           """)
+
+        self.add_parameter("control_setpoint",
+                           label="Control goal",
+                           get_cmd=self._cmd_prefix + "CNTRSP?",
+                           set_cmd=self._cmd_prefix + "CNTRSP {}",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           unit="V",  # TODO: unit V correct?
+                           docstring="""
+                           Gets/sets the control goal of the thin etalon control loop. The error
+                           signal of the PI control loop is calculated according to:
+                           Error = TE:CNTRSP - (TE:DCVALUE)/(DPOW:DCVALUE)
+                           """)
+
+        self.add_parameter("control_integral",
+                           label="Integral gain",
+                           get_cmd=self._cmd_prefix + "CNTRINT?",
+                           set_cmd=self._cmd_prefix + "CNTRINT {}",
+                           get_parser=float,
+                           vals=vals.Numbers(),
+                           # TODO unit="???",
+                           docstring="""
+                           Gets/sets the integral gain of the thin Etalon PI control loop.
+                           """)
+
+
 class SirahMatisse(VisaInstrument):
+    """Sirah Matisse laser instrument driver
+
+    Args:
+        name: Name of the instrument
+        address: VISA resource name (used to establish a connection to the instrument)
+    """
     def __init__(self, name: str, address: str):
         super().__init__(name, address)
 
-        motor_channels = ChannelList(self, "motor_channels", SirahMatisseMotor, snapshotable=False)
+        self.add_function("error_codes",
+                          call_cmd="ERR:CODE?",
+                          docstring="""
+                          Get all error codes raised since last `error_clear` command (or system
+                          startup).
+                          """)
 
-        channel_classes = {"bifi": SirahMatisseBiFiMotor,
-                           "thet": SirahMatisseThEtMotor}
+        self.add_function("error_clear",
+                          call_cmd="ERR:CL",
+                          docstring="""
+                          Clears error conditions and information. This command does not effect
+                          error conditions from the motor controller.
+                          """)
+
+        channel_classes = {
+            "power_diode": SirahMatissePowerDiode,             # power diode
+            "motor_bifi": SirahMatisseBiFiMotor,               # birefringent filter motor
+            "motor_thin_etalon": SirahMatisseThinEtalonMotor,  # thin etalon motor
+            "piezo_etalon": SirahMatissePiezoEtalonControl,    # piezo/thick etalon control
+            "thin_etalon": SirahMatisseThinEtalonControl       # thin etalon control
+        }
 
         for name, cls in channel_classes.items():
-            motor_chan = cls(self, name)
-            motor_channels.append(motor_chan)
-            self.add_submodule(motor_chan.short_name, motor_chan)
+            channel = cls(self, name)
+            self.add_submodule(channel.short_name, channel)
 
-        motor_channels.lock()
-        self.add_submodule("motor_channels", motor_channels)
-
-        self.add_function("clear_errors",
-                          call_cmd="ERR:CL",
-                          docstring="")  # TODO
-
-        self.add_parameter("power_diode_dc",
-                           get_cmd="DPOW:DC?",
-                           get_parser=self._float_parser,
-                           vals=vals.Numbers(),
-                           # TODO unit="???",
-                           docstring="")  # TODO
-
-        self.add_parameter("te_reflex",
-                           get_cmd="TE:DC?",
-                           get_parser=self._float_parser,
-                           vals=vals.Numbers(),
-                           # TODO unit="???",
-                           docstring="")  # TODO
+        self.error_clear()
+        self.motor_bifi.clear()
+        self.motor_thin_etalon.clear()
 
         self.connect_message()
 
-    def write(self, *args, **kwargs):
-        self.ask(*args, *kwargs)
+    def get_idn(self) -> Dict[str, Optional[str]]:
+        """Queries and parses the identification string of the device.
 
-    @staticmethod
-    def _float_parser(value: str) -> float:
-        return float(value.split()[-1])
+        The identification string consists of the following components: model name, serial number,
+        board version, firmware version, and version date. It typically looks like this:
+
+            :IDN: "Matisse TS, S/N:05-25-20, DSP Rev. 01.00, Firmware: 1.6, Date: Apr 23 2007"
+
+        Returns:
+            A dictionary containing the parsed data from the identification string
+        """
+        idn = {"vendor": "Sirah",
+               "model": self.name,
+               "serial": None,
+               "firmware": None}
+        raw_idn = ""
+
+        try:
+            raw_idn = self.ask("*IDN?")
+            parts = [part.strip() for part in raw_idn.split(",")]
+            key_mapping = {"s/n": "serial",
+                           "dsp rev.": "board"}
+
+            idn["model"] = parts[0]
+
+            for part in parts[1:]:
+                key, value = part.split(":", maxsplit=1)
+                key = key.lower()
+                if key in key_mapping:
+                    key = key_mapping[key]
+                idn[key] = value
+        except Exception:
+            self.visa_log.debug("DEBUG: Error getting or interpreting *IDN?: " + repr(raw_idn))
+
+        return idn
+
+    def ask_raw(self, cmd: str) -> str:
+        """
+        Low-level interface to ``visa_handle.ask``.
+
+        Args:
+            cmd: The command to send to the instrument.
+
+        Returns:
+            str: The instrument's response.
+        """
+        with DelayedKeyboardInterrupt():
+            self.visa_log.debug(f"Querying: {cmd}")
+            response = self.visa_handle.query(cmd)
+            self.visa_log.debug(f"Response: {response}")
+
+            # Handle error response
+            if response.startswith('!ERROR'):
+                try:
+                    # Extract error code from response
+                    err_code = int(response.split(maxsplit=1)[1])
+                    raise SirahMatisseError("Error querying \"{}\"".format(cmd), err_code)
+                except SirahMatisseError:
+                    raise
+                except Exception as exc:
+                    raise SirahMatisseError("Unknown error querying \"{}\"".format(cmd)) from exc
+                finally:
+                    # Try to clear error buffer
+                    try:
+                        self.clear_errors()
+                    except Exception as exc:
+                        warnings.warn("Couldn't clear error buffer after receiving an error "
+                                      "response.\n -> {}: {}".format(type(exc).__name__, exc))
+            elif response == "OK":
+                return ""
+            else:
+                # Extract result from response-string
+                response_split = response.split(maxsplit=1)
+                if len(response_split) > 1:
+                    result = response_split[1]
+
+                    # If response is surrounded by quotes, remove them
+                    if result[0] == result[-1] == "\"":
+                        return result[1:-1]
+                    else:
+                        return result
+                else:
+                    return ""
+
+    def write(self, *args, **kwargs):
+        # Do same as ask, but don't return
+        self.ask(*args, **kwargs)
