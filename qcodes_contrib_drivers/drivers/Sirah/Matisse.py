@@ -227,6 +227,16 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   Gets/sets the integral gain of the thin Etalon PI control loop.
                                   """)
 
+        self._define_common_param("dc_value",
+                                  label="DC-part",
+                                  get_cmd=self._cmd_prefix + "DC?",
+                                  get_parser=float,
+                                  unit="V",
+                                  docstring="""
+                                  Gets the DC-part of the integral laser output. The value is given
+                                  in volts at the controller input. This is a read-only value.
+                                  """)
+
         # Pre-defined functions
 
         self._define_common_param("move_relative",
@@ -418,16 +428,10 @@ class SirahMatissePowerDiode(SirahMatisseChannel):
     def __init__(self, parent: "SirahMatisse", name: str, **kwargs):
         super().__init__(parent, name, "DPOW", **kwargs)
 
-        self.add_parameter("dc_value",
-                           label="DC-part",
-                           get_cmd=self._cmd_prefix + "DC?",
-                           get_parser=float,
-                           unit="V",
-                           docstring="""
-                           Gets the DC-part of the integral laser output. The value is given in
-                           volts at the controller input. This is a read-only value.
-                           """)
+        # Pre-defined parameters/functions
+        self.add_common_parameter("dc_value")
 
+        # Additional parameters for power diode
         self.add_parameter("wave_table",
                            label="Current waveform of the AC-part",
                            get_cmd=self._cmd_prefix + "WAVTAB?",
@@ -824,19 +828,9 @@ class SirahMatisseThinEtalonControl(SirahMatisseChannel):
         self.add_common_parameter("reference_scan")
         self.add_common_parameter("control_setpoint")
         self.add_common_parameter("control_integral")
+        self.add_common_parameter("dc_value")
 
         # Additional parameters for thin etalon control
-        self.add_parameter("dc_value",
-                           label="DC-part of the thin etalon's reflex",
-                           get_cmd=self._cmd_prefix + "DC?",
-                           get_parser=float,
-                           vals=vals.Numbers(),
-                           unit="V",
-                           docstring="""
-                           Gets the DC-part of the reflex of the thin etalon. The value is given in
-                           volts at the controller input.
-                           """)
-
         self.add_parameter("control_error",
                            label="Current error value",
                            get_cmd=self._cmd_prefix + "CNTRERR?",
