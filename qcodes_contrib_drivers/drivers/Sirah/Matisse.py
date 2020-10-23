@@ -970,12 +970,14 @@ class SirahMatisse(VisaInstrument):
     def __init__(self, name: str, address: str):
         super().__init__(name, address)
 
-        self.add_function("error_codes",
-                          call_cmd="ERR:CODE?",
-                          docstring="""
-                          Get all error codes raised since last `error_clear` command (or system
-                          startup).
-                          """)
+        self.add_parameter("error_codes",
+                           label="Last error codes",
+                           get_cmd="ERR:CODE?",
+                           get_parser=self._parse_error_codes,
+                           docstring="""
+                           Get all error codes raised since last `error_clear` command (or system
+                           startup).
+                           """)
 
         self.add_function("error_clear",
                           call_cmd="ERR:CL",
@@ -1077,19 +1079,33 @@ class SirahMatisse(VisaInstrument):
             elif response == "OK":
                 return ""
             else:
-                # Extract result from response-string
-                response_split = response.split(maxsplit=1)
-                if len(response_split) > 1:
-                    result = response_split[1]
+                try:
+                    # Extract result from response-string
+                    result = response.split(maxsplit=1)[1]
 
                     # If response is surrounded by quotes, remove them
                     if result[0] == result[-1] == "\"":
                         return result[1:-1]
                     else:
                         return result
-                else:
+                except Exception:
                     return ""
 
     def write(self, *args, **kwargs):
-        # Do same as ask, but don't return
+        """This instrument always gives an answer, even when writing. Therefore the write-function
+        is redirected to the ask-function, so that the answer is popped from the answer queue.
+        """
         self.ask(*args, **kwargs)
+
+    @staticmethod
+    def _parse_error_codes(error_codes: str) -> List[int]:
+        """Convert string with space-separated numbers into list of integers
+
+        Args:
+            error_codes: Error-codes string which needs to be parsed. This is the response string
+                         when requesting `ERR:CODES?`
+
+        Returns:
+            List of integer error-codes
+        """
+        return [int(code) for code in error_codes.split()]
