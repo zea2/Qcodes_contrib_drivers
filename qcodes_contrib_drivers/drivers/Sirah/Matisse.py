@@ -1,3 +1,13 @@
+"""Sirah Matisse laser instrument driver
+
+The driver `SirahMatisse` controls the laser instrument Sirah Matisse. The hardware communication
+works with VISA and is handled by `VisaInstrument`. There are separate instrument channels for the
+different components/parts of the instrument.
+
+Author:
+    Lukas Lankes, Forschugnszentrum Jülich GmbH - ZEA-2, l.lankes@fz-juelich.de
+"""
+
 import abc
 from typing import Dict, List, Optional
 import visa
@@ -17,13 +27,16 @@ class SirahMatisseError(Exception):
         error_code: Return/error code
     """
 
-    def __init__(self, message: str, error_code: Optional[int] = None):
-        super().__init__(message, error_code)
+    def __init__(self, message: str, error_codes: Optional[List[int]] = None):
+        super().__init__(message, error_codes)
         self._message = message
-        self._error_code = error_code
+        self._error_codes = error_codes
 
     def __str__(self):
-        return "{} ({})".format(self._message, self._error_code)
+        if self._error_codes is None:
+            return self._message
+        else:
+            return "{} ({})".format(self._message, ",".join(str(c) for c in self._error_codes))
 
 
 class SirahMatisseChannel(InstrumentChannel, abc.ABC):
@@ -50,7 +63,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._set_position,
                                   get_parser=int,
                                   vals=vals.Ints(),
-                                  # TODO unit="???", # steps?
                                   docstring="""
                                   Gets the current position of stepper motor position or moves
                                   it to an absolute position.
@@ -116,7 +128,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   get_cmd=self._cmd_prefix + "MAX?",
                                   get_parser=int,
                                   vals=vals.Ints(),
-                                  # TODO unit="???",
                                   docstring="""
                                   Gets the maximum position of the stepper motor.
                                   """)
@@ -127,7 +138,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "INC {}",
                                   get_parser=int,
                                   vals=vals.Ints(),
-                                  # TODO unit="???", # steps?
                                   docstring="""
                                   Gets/sets the number of motor steps made by the Birefringent
                                   Filter when the manual control button is pressed for a short
@@ -141,7 +151,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "CAVSCN {}",
                                   get_parser=float,
                                   vals=vals.Numbers(),
-                                  # TODO unit="???",
                                   docstring="""
                                   Gets/sets the proportional factor that controls how a scan of the
                                   slow cavity piezo influences the position of the birefringent
@@ -155,7 +164,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "REFSCN {}",
                                   get_parser=float,
                                   vals=vals.Numbers(),
-                                  # TODO unit="???",
                                   docstring="""
                                   Gets/sets the proportional factor that controls how a scan of the
                                   reference cell piezo influences the position of the birefringent
@@ -187,7 +195,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "CNTRPROP {}",
                                   get_parser=float,
                                   vals=vals.Numbers(),
-                                  # TODO unit="???",
                                   docstring="""
                                   Gets/sets the proportional gain of a control loop
                                   """)
@@ -198,7 +205,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "CNTRAVG {}",
                                   get_parser=int,
                                   vals=vals.Ints(),
-                                  # TODO unit="???",
                                   docstring="""
                                   Gets/sets the number of measurements averaged of a control loop
                                   """)
@@ -209,7 +215,7 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "CNTRSP {}",
                                   get_parser=float,
                                   vals=vals.Numbers(),
-                                  unit="V",  # TODO: unit V correct?
+                                  unit="V",
                                   docstring="""
                                   Gets/sets the control goal of the thin etalon control loop. The
                                   error signal of the PI control loop is calculated according to:
@@ -222,7 +228,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                                   set_cmd=self._cmd_prefix + "CNTRINT {}",
                                   get_parser=float,
                                   vals=vals.Numbers(),
-                                  # TODO unit="???",
                                   docstring="""
                                   Gets/sets the integral gain of the thin Etalon PI control loop.
                                   """)
@@ -315,10 +320,6 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
                 break
             if status < 0:  # < 0 := error (bit 7 is set)
                 raise visa.VisaIOError(status)
-
-        # TODO: Alternatively, try this. Check what which one better...
-        # while self.position() != target_position:
-        #     pass
 
     @staticmethod
     def _status_parser(raw_status: str) -> dict:
@@ -491,7 +492,6 @@ class SirahMatisseBiFiMotor(SirahMatisseChannel):
         self.add_function("move_constant_absolute",
                           call_cmd=self._cmd_prefix + "CABS {}",
                           args=(vals.Ints(),),
-                          # TODO unit="???",
                           docstring="""
                           Move the stepper motor of the birefringent filter to an absolute position
                           using the constant speed defined by `bifi_frequency` (MOTBI:FREQ). The
@@ -502,7 +502,6 @@ class SirahMatisseBiFiMotor(SirahMatisseChannel):
         self.add_function("move_constant_relative",
                           call_cmd=self._cmd_prefix + "CREL {}",
                           args=(vals.Ints(),),
-                          # TODO unit="???",
                           docstring="""
                           Move the stepper motor of the birefringent filter relative to its current
                           position using the constant speed defined by `bifi_frequency`
@@ -1064,18 +1063,28 @@ class SirahMatisse(VisaInstrument):
                 try:
                     # Extract error code from response
                     err_code = int(response.split(maxsplit=1)[1])
-                    raise SirahMatisseError("Error querying \"{}\"".format(cmd), err_code)
-                except SirahMatisseError:
-                    raise
+                    exc = None
                 except Exception as exc:
-                    raise SirahMatisseError("Unknown error querying \"{}\"".format(cmd)) from exc
-                finally:
-                    # Try to clear error buffer
-                    try:
-                        self.clear_errors()
-                    except Exception as exc:
-                        warnings.warn("Couldn't clear error buffer after receiving an error "
-                                      "response.\n -> {}: {}".format(type(exc).__name__, exc))
+                    err_code = None
+
+                try:
+                    err_codes_list = self.error_codes()
+                except Exception:
+                    err_codes_list = [err_code] if err_code is not None else None
+
+                # Try to clear error buffer
+                try:
+                    self.clear_errors()
+                except Exception as exc:
+                    warnings.warn("Couldn't clear error buffer after receiving an error "
+                                  "response.\n -> {}: {}".format(type(exc).__name__, exc))
+
+                if exc is None:
+                    raise SirahMatisseError("Error querying \"{}\": {}".format(cmd, err_code),
+                                            err_codes_list)
+                else:
+                    raise SirahMatisseError("Unknown error querying \"{}\"".format(cmd),
+                                            err_codes_list) from exc
             elif response == "OK":
                 return ""
             else:
