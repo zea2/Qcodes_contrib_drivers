@@ -1,4 +1,4 @@
-"""Sirah Matisse laser instrument driver
+﻿"""Sirah Matisse laser instrument driver
 
 The driver `SirahMatisse` controls the laser instrument Sirah Matisse. The hardware communication
 works with VISA and is handled by `VisaInstrument`. There are separate instrument channels for the
@@ -9,6 +9,7 @@ Author:
 """
 
 import abc
+import time
 from typing import Dict, List, Optional
 import visa
 import warnings
@@ -36,7 +37,8 @@ class SirahMatisseError(Exception):
         if self._error_codes is None:
             return self._message
         else:
-            return "{} ({})".format(self._message, ",".join(str(c) for c in self._error_codes))
+            err_codes = ",".join(str(c) for c in self._error_codes)
+            return f"{self._message} ({err_codes})"
 
 
 class SirahMatisseChannel(InstrumentChannel, abc.ABC):
@@ -315,6 +317,7 @@ class SirahMatisseChannel(InstrumentChannel, abc.ABC):
     def _wait_for_idle(self):
         """Waits until parameter `status` is 2 (= idle)"""
         while True:
+            time.sleep(0.05)  # TODO Just a test
             status = self.status()["status"]
             if status == 0x02:  # 0x02 := idle
                 break
@@ -1076,14 +1079,14 @@ class SirahMatisse(VisaInstrument):
                 try:
                     self.clear_errors()
                 except Exception as exc:
-                    warnings.warn("Couldn't clear error buffer after receiving an error "
-                                  "response.\n -> {}: {}".format(type(exc).__name__, exc))
+                    warnings.warn(f"Couldn't clear error buffer after receiving an error "
+                                  f"response.\n -> {type(exc).__name__}: {exc}")
 
                 if exc is None:
-                    raise SirahMatisseError("Error querying \"{}\": {}".format(cmd, err_code),
+                    raise SirahMatisseError(f"Error querying \"{cmd}\": {err_code}",
                                             err_codes_list)
                 else:
-                    raise SirahMatisseError("Unknown error querying \"{}\"".format(cmd),
+                    raise SirahMatisseError(f"Unknown error querying \"{cmd}\"",
                                             err_codes_list) from exc
             elif response == "OK":
                 return ""
