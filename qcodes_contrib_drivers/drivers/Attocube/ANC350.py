@@ -121,6 +121,14 @@ class Anc350Axis(InstrumentChannel):
                            get_cmd=self._get_output,
                            set_cmd=self._set_output)
 
+        # Look-up table
+        if self._parent._version_no >= 4:
+            self.add_parameter("lut_name",
+                               label="Look-up table name",
+                               get_cmd=self._get_lut_name)
+
+            self.load_lut_file = self._load_lut_file
+
         # Set actual unit (either mm or m°) to positional parameters
         self._update_position_unit()
 
@@ -449,7 +457,37 @@ class Anc350Axis(InstrumentChannel):
         Returns:
             DC output voltage in Volts [V]
         """
+        if self._parent._version < 4:
+            raise NotImplementedError("Anc350Axis.voltage-getter is only available with library "
+                                      "version 4.")
+
         return self._parent._lib.get_dc_voltage(self._parent._device_handle, self._axis)
+
+    def _get_lut_name(self) -> str:
+        """
+        Get the name of the currently selected sensor look-up table.
+
+        Returns:
+            Name of look-up table
+        """
+        if self._parent._version < 4:
+            raise NotImplementedError("Anc350Axis.lut_name is only available with library version "
+                                      "4.")
+
+        return self._parent._lib.get_lut_name(self._parent._device_handle, self._axis)
+
+    def _load_lut_file(self, filename: str) -> None:
+        """
+        Loads a sensor look-up table from a file into the device.
+
+        Args:
+            filename: Path to the desired sensor look-up table
+        """
+        if self._parent._version < 4:
+            raise NotImplementedError("Anc350Axis.load_lut_file is only available with library "
+                                      "version 4.")
+
+        return self._parent._lib.load_lut_file(self._parent._device_handle, self._axis, filename)
 
 
 class ANC350(Instrument):
